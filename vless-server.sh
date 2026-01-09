@@ -630,24 +630,25 @@ generate_xray_config() {
                 case "$ip_version" in
                     ipv4_only)
                         warp_tag="warp-ipv4"
-                        warp_strategy="UseIPv4"
+                        warp_strategy="ForceIPv4"
                         ;;
                     ipv6_only)
                         warp_tag="warp-ipv6"
-                        warp_strategy="UseIPv6"
+                        warp_strategy="ForceIPv6"
                         ;;
                     prefer_ipv6)
                         warp_tag="warp-prefer-ipv6"
-                        warp_strategy="UseIPv6"
+                        warp_strategy="ForceIPv6v4"
                         ;;
                     prefer_ipv4|*)
                         warp_tag="warp-prefer-ipv4"
-                        warp_strategy="UseIPv4"
+                        warp_strategy="ForceIPv4v6"
                         ;;
                 esac
                 if ! echo "$outbounds" | jq -e --arg tag "$warp_tag" '.[] | select(.tag == $tag)' >/dev/null 2>&1; then
                     local warp_out=$(gen_xray_warp_outbound)
                     if [[ -n "$warp_out" ]]; then
+                        # WireGuard 使用 ForceIPv4 等策略（不是 UseIPv4）
                         local warp_out_with_strategy=$(echo "$warp_out" | jq --arg tag "$warp_tag" --arg ds "$warp_strategy" \
                             '.tag = $tag | .domainStrategy = $ds')
                         outbounds=$(echo "$outbounds" | jq --argjson out "$warp_out_with_strategy" '. + [$out]')
@@ -679,11 +680,10 @@ generate_xray_config() {
                 # 没有 warp outbound，生成一个默认的
                 local warp_out=$(gen_xray_warp_outbound)
                 if [[ -n "$warp_out" ]]; then
-                    # 使用默认 tag "warp"，默认策略 UseIPv4
+                    # 使用默认 tag "warp"，WireGuard 使用 ForceIPv4 策略
                     local warp_out_default=$(echo "$warp_out" | jq '.tag = "warp"')
-                    # 只有 WireGuard 类型才需要 domainStrategy
                     if echo "$warp_out_default" | jq -e '.protocol == "wireguard"' >/dev/null 2>&1; then
-                        warp_out_default=$(echo "$warp_out_default" | jq '.domainStrategy = "UseIPv4"')
+                        warp_out_default=$(echo "$warp_out_default" | jq '.domainStrategy = "ForceIPv4"')
                     fi
                     outbounds=$(echo "$outbounds" | jq --argjson out "$warp_out_default" '. + [$out]')
                 fi
@@ -5557,6 +5557,42 @@ register_warp() {
     return 0
 }
 
+# WARP IPv6 端点优选
+# 测试多个 Cloudflare WARP IPv6 端点，选择延迟最低的
+_select_best_warp_ipv6_endpoint() {
+    local port="${1:-2408}"
+    local endpoints=(
+        "2606:4700:d0::a29f:c001"
+        "2606:4700:d0::a29f:c002"
+        "2606:4700:d1::a29f:c001"
+        "2606:4700:d1::a29f:c002"
+    )
+    
+    local best_endpoint="${endpoints[0]}"
+    local best_latency=9999
+    
+    echo -ne "  ${C}▸${NC} 优选 IPv6 端点..." >&2
+    
+    for ep in "${endpoints[@]}"; do
+        # ping6 测试延迟，取平均值
+        local latency=$(ping6 -c 2 -W 1 "$ep" 2>/dev/null | grep -oP 'time=\K[0-9.]+' | awk '{sum+=$1} END {if(NR>0) printf "%.0f", sum/NR; else print 9999}')
+        [[ -z "$latency" ]] && latency=9999
+        
+        if [[ "$latency" -lt "$best_latency" ]]; then
+            best_latency="$latency"
+            best_endpoint="$ep"
+        fi
+    done
+    
+    if [[ "$best_latency" -lt 9999 ]]; then
+        echo -e " ${G}${best_endpoint}${NC} (${best_latency}ms)" >&2
+    else
+        echo -e " ${Y}${best_endpoint}${NC} (默认)" >&2
+    fi
+    
+    echo "[${best_endpoint}]:${port}"
+}
+
 # 规范化 base64 字符串，自动添加正确的填充符
 normalize_base64() {
     local input="$1"
@@ -5583,14 +5619,13 @@ parse_and_save_warp_config() {
     public_key=$(normalize_base64 "$public_key")
     local endpoint=$(grep "Endpoint" "$conf_file" | cut -d'=' -f2 | xargs)
     
-    # 自动检测：纯 IPv6 服务器使用 IPv6 端点
+    # 自动检测：纯 IPv6 服务器使用优选的 IPv6 端点
     local has_ipv4=$(curl -4 -s --max-time 3 ifconfig.me 2>/dev/null)
     if [[ -z "$has_ipv4" ]]; then
-        # 无 IPv4，替换为 Cloudflare WARP IPv6 端点
+        # 无 IPv4，自动优选 WARP IPv6 端点
         local ep_port=$(echo "$endpoint" | grep -oE ':[0-9]+$' | tr -d ':')
         [[ -z "$ep_port" ]] && ep_port="2408"
-        endpoint="[2606:4700:d0::a29f:c001]:${ep_port}"
-        echo -e "  ${Y}提示${NC}: 检测到纯 IPv6 服务器，已自动切换到 IPv6 端点"
+        endpoint=$(_select_best_warp_ipv6_endpoint "$ep_port")
     fi
     
     # 解析 Address 行，可能有多行或逗号分隔
