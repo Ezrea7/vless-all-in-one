@@ -1,6 +1,6 @@
 #!/bin/bash
 #═══════════════════════════════════════════════════════════════════════════════
-#  多协议代理一键部署脚本 v3.1.10 [服务端]
+#  多协议代理一键部署脚本 v3.1.11 [服务端]
 #  
 #  架构升级:
 #    • Xray 核心: 处理 TCP/TLS 协议 (VLESS/VMess/Trojan/SOCKS/SS2022)
@@ -17,7 +17,7 @@
 #  项目地址: https://github.com/Chil30/vless-all-in-one
 #═══════════════════════════════════════════════════════════════════════════════
 
-readonly VERSION="3.1.10"
+readonly VERSION="3.1.11"
 readonly AUTHOR="Chil30"
 readonly REPO_URL="https://github.com/Chil30/vless-all-in-one"
 readonly CFG="/etc/vless-reality"
@@ -6402,9 +6402,11 @@ uninstall_warp() {
 
 # 预设规则类型定义 (使用 geosite 规则库，更全面且自动更新)
 declare -A ROUTING_PRESETS=(
+    [ai-intl]="geosite:category-ai-!cn"
     [openai]="geosite:openai"
     [netflix]="geosite:netflix"
     [disney]="geosite:disney"
+    [mytvsuper]="geosite:mytvsuper"
     [youtube]="geosite:youtube"
     [spotify]="geosite:spotify"
     [tiktok]="geosite:tiktok"
@@ -6422,9 +6424,11 @@ declare -A ROUTING_PRESETS_IP=(
 
 # 预设规则显示名称
 declare -A ROUTING_PRESET_NAMES=(
+    [ai-intl]="AI服务(国际)"
     [openai]="OpenAI/ChatGPT"
     [netflix]="Netflix"
     [disney]="Disney+"
+    [mytvsuper]="MyTVSuper"
     [youtube]="YouTube"
     [spotify]="Spotify"
     [tiktok]="TikTok"
@@ -6774,6 +6778,14 @@ gen_xray_routing_rules() {
                     result=$(echo "$result" | jq --arg geoip "$geoip_rule" --arg tag "$tag" \
                         '. + [{"type": "field", "ip": [$geoip], "outboundTag": $tag}]')
                 fi
+            elif [[ "$domains" =~ ^geoip:[^,]+(,geoip:[^,]+)*$ ]]; then
+                # geoip 规则支持多个条目
+                local geoip_array
+                geoip_array=$(echo "$domains" | tr ',' '\n' | grep -v '^$' | jq -R . 2>/dev/null | jq -s . 2>/dev/null)
+                if [[ -n "$geoip_array" && "$geoip_array" != "[]" && "$geoip_array" != "null" ]] && echo "$geoip_array" | jq empty 2>/dev/null; then
+                    result=$(echo "$result" | jq --argjson ips "$geoip_array" --arg tag "$tag" \
+                        '. + [{"type": "field", "ip": $ips, "outboundTag": $tag}]')
+                fi
             else
                 # 分离域名和 IP 地址
                 local domain_list="" ip_list=""
@@ -6865,6 +6877,14 @@ gen_singbox_routing_rules() {
                 local geosite_name="${domains#geosite:}"
                 result=$(echo "$result" | jq --arg geosite "$geosite_name" --arg tag "$tag" \
                     '. + [{"rule_set": ["geosite-\($geosite)"], "outbound": $tag}]')
+            elif [[ "$domains" =~ ^geoip:[^,]+(,geoip:[^,]+)*$ ]]; then
+                # geoip 规则转换为对应 rule_set
+                local geoip_rule_set
+                geoip_rule_set=$(echo "$domains" | tr ',' '\n' | grep -v '^$' | sed 's/^geoip:/geoip-/' | jq -R . 2>/dev/null | jq -s . 2>/dev/null)
+                if [[ -n "$geoip_rule_set" && "$geoip_rule_set" != "[]" && "$geoip_rule_set" != "null" ]] && echo "$geoip_rule_set" | jq empty 2>/dev/null; then
+                    result=$(echo "$result" | jq --argjson sets "$geoip_rule_set" --arg tag "$tag" \
+                        '. + [{"rule_set": $sets, "outbound": $tag}]')
+                fi
             else
                 # 分离域名和 IP 地址
                 local domain_list="" ip_list=""
@@ -7243,10 +7263,12 @@ _add_routing_rule() {
         9)
             rule_type="custom"
             echo ""
-            echo -e "  ${Y}输入要分流的域名或IP (逗号分隔):${NC}"
-            echo -e "  ${D}域名示例: example.com,test.org${NC}"
-            echo -e "  ${D}IP示例: 1.2.3.4,192.168.0.0/16${NC}"
-            read -rp "  域名/IP: " custom_domains
+            echo -e "  ${Y}输入要分流的匹配规则 (逗号分隔):${NC}"
+            echo -e "  ${D}支持三种格式:${NC}"
+            echo -e "  ${D}  1) 普通域名/IP: google.com,youtube.com 或 1.2.3.4,192.168.0.0/16${NC}"
+            echo -e "  ${D}  2) geosite 规则: geosite:category-ads-all${NC}"
+            echo -e "  ${D}  3) geoip 规则: geoip:cn,geoip:telegram${NC}"
+            read -rp "  匹配规则: " custom_domains
             custom_domains=$(echo "$custom_domains" | tr -d ' \t')
             if [[ -z "$custom_domains" ]]; then
                 _warn "输入不能为空"
