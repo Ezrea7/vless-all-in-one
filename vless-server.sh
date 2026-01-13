@@ -331,9 +331,21 @@ _has_ipv6() {
     [[ -e /proc/net/if_inet6 ]]
 }
 
-# 获取监听地址：有 IPv6 用 ::（双栈），否则用 0.0.0.0
+# 检测 IPv6 socket 是否允许双栈（IPv4-mapped）
+_can_dual_stack_listen() {
+    [[ ! -f /proc/sys/net/ipv6/bindv6only ]] && return 0
+    local val
+    val=$(cat /proc/sys/net/ipv6/bindv6only 2>/dev/null || echo "1")
+    [[ "$val" == "0" ]]
+}
+
+# 获取监听地址：有 IPv6 且支持双栈才用 ::，否则用 0.0.0.0
 _listen_addr() {
-    _has_ipv6 && echo "::" || echo "0.0.0.0"
+    if _has_ipv6 && _can_dual_stack_listen; then
+        echo "::"
+    else
+        echo "0.0.0.0"
+    fi
 }
 
 # 格式化 host:port（IPv6 需要方括号）
@@ -412,6 +424,11 @@ elif [[ -f /etc/os-release ]] && grep -q "Ubuntu" /etc/os-release; then
     DISTRO="ubuntu"
 else
     DISTRO="debian"
+fi
+
+# RHEL 系兼容：无 yum 时使用 dnf
+if ! command -v yum &>/dev/null && command -v dnf &>/dev/null; then
+    yum() { dnf "$@"; }
 fi
 
 #═══════════════════════════════════════════════════════════════════════════════
@@ -554,6 +571,9 @@ generate_xray_config() {
     # 读取直连出口 IP 版本设置（默认 AsIs）
     local direct_ip_version="as_is"
     [[ -f "$CFG/direct_ip_version" ]] && direct_ip_version=$(cat "$CFG/direct_ip_version")
+
+    # 监听地址：IPv6 双栈不可用时退回 IPv4
+    local listen_addr=$(_listen_addr)
     
     # 根据设置生成 freedom 出口配置
     local direct_outbound='{"protocol": "freedom", "tag": "direct"}'
@@ -909,9 +929,10 @@ add_xray_inbound_v2() {
                 --arg private_key "$private_key" \
                 --arg short_id "$short_id" \
                 --arg dest "$reality_dest" \
+                --arg listen_addr "$listen_addr" \
             '{
                 port: $port,
-                listen: "::",
+                listen: $listen_addr,
                 protocol: "vless",
                 settings: {
                     clients: [{id: $uuid, flow: "xtls-rprx-vision"}],
@@ -941,9 +962,10 @@ add_xray_inbound_v2() {
                 --arg cert "$CFG/certs/server.crt" \
                 --arg key "$CFG/certs/server.key" \
                 --argjson fallbacks "$fallbacks" \
+                --arg listen_addr "$listen_addr" \
             '{
                 port: $port,
-                listen: "::",
+                listen: $listen_addr,
                 protocol: "vless",
                 settings: {
                     clients: [{id: $uuid, flow: "xtls-rprx-vision"}],
@@ -993,9 +1015,10 @@ add_xray_inbound_v2() {
                     --arg sni "$sni" \
                     --arg cert "$CFG/certs/server.crt" \
                     --arg key "$CFG/certs/server.key" \
+                    --arg listen_addr "$listen_addr" \
                 '{
                     port: $port,
-                    listen: "::",
+                    listen: $listen_addr,
                     protocol: "vless",
                     settings: {
                         clients: [{id: $uuid}],
@@ -1022,9 +1045,10 @@ add_xray_inbound_v2() {
                 --arg private_key "$private_key" \
                 --arg short_id "$short_id" \
                 --arg dest "$reality_dest" \
+                --arg listen_addr "$listen_addr" \
             '{
                 port: $port,
-                listen: "::",
+                listen: $listen_addr,
                 protocol: "vless",
                 settings: {clients: [{id: $uuid}], decryption: "none"},
                 streamSettings: {
@@ -1071,9 +1095,10 @@ add_xray_inbound_v2() {
                     --arg sni "$sni" \
                     --arg cert "$CFG/certs/server.crt" \
                     --arg key "$CFG/certs/server.key" \
+                    --arg listen_addr "$listen_addr" \
                 '{
                     port: $port,
-                    listen: "::",
+                    listen: $listen_addr,
                     protocol: "vmess",
                     settings: {clients: [{id: $uuid, alterId: 0, security: "auto"}]},
                     streamSettings: {
@@ -1096,9 +1121,10 @@ add_xray_inbound_v2() {
                 --arg cert "$CFG/certs/server.crt" \
                 --arg key "$CFG/certs/server.key" \
                 --argjson fallbacks "$fallbacks" \
+                --arg listen_addr "$listen_addr" \
             '{
                 port: $port,
-                listen: "::",
+                listen: $listen_addr,
                 protocol: "trojan",
                 settings: {
                     clients: [{password: $password}],
@@ -1124,15 +1150,16 @@ add_xray_inbound_v2() {
                     --arg password "$password" \
                     --arg cert "$CFG/certs/server.crt" \
                     --arg key "$CFG/certs/server.key" \
+                    --arg listen_addr "$listen_addr" \
                 '{
                     port: $port,
-                    listen: "::",
+                    listen: $listen_addr,
                     protocol: "socks",
                     settings: {
                         auth: "password",
                         accounts: [{user: $username, pass: $password}],
                         udp: true,
-                        ip: "::"
+                        ip: $listen_addr
                     },
                     streamSettings: {
                         network: "tcp",
@@ -1149,15 +1176,16 @@ add_xray_inbound_v2() {
                     --argjson port "$port" \
                     --arg username "$username" \
                     --arg password "$password" \
+                    --arg listen_addr "$listen_addr" \
                 '{
                     port: $port,
-                    listen: "::",
+                    listen: $listen_addr,
                     protocol: "socks",
                     settings: {
                         auth: "password",
                         accounts: [{user: $username, pass: $password}],
                         udp: true,
-                        ip: "::"
+                        ip: $listen_addr
                     },
                     tag: "socks5"
                 }' > "$tmp_inbound"
@@ -1169,9 +1197,10 @@ add_xray_inbound_v2() {
                 --arg method "$method" \
                 --arg password "$password" \
                 --arg tag "$protocol" \
+                --arg listen_addr "$listen_addr" \
             '{
                 port: $port,
-                listen: "::",
+                listen: $listen_addr,
                 protocol: "shadowsocks",
                 settings: {
                     method: $method,
@@ -1386,7 +1415,8 @@ ensure_dual_stack_listen() {
     if [[ "$new_value" == "0" ]]; then
         _ok "双栈监听已启用（IPv4 和 IPv6 可同时连接）"
     else
-        _warn "双栈配置可能未生效，建议手动执行: sysctl -w net.ipv6.bindv6only=0"
+        _warn "双栈配置未生效，将使用 IPv4 监听以保证可用性"
+        _warn "如需双栈，请手动执行: sysctl -w net.ipv6.bindv6only=0"
     fi
 }
 
@@ -3561,6 +3591,9 @@ generate_singbox_config() {
     # 读取直连出口 IP 版本设置（默认 AsIs）
     local direct_ip_version="as_is"
     [[ -f "$CFG/direct_ip_version" ]] && direct_ip_version=$(cat "$CFG/direct_ip_version")
+
+    # 监听地址：IPv6 双栈不可用时退回 IPv4
+    local listen_addr=$(_listen_addr)
     
     # 根据设置生成 direct 出口配置
     local direct_outbound=""
@@ -3882,10 +3915,11 @@ generate_singbox_config() {
                     --arg password "$password" \
                     --arg cert "$cert_path" \
                     --arg key "$key_path" \
+                    --arg listen_addr "$listen_addr" \
                 '{
                     type: "hysteria2",
                     tag: "hy2-in",
-                    listen: "::",
+                    listen: $listen_addr,
                     listen_port: $port,
                     users: [{password: $password}],
                     tls: {
@@ -3911,10 +3945,11 @@ generate_singbox_config() {
                     --arg password "$password" \
                     --arg cert "$cert_path" \
                     --arg key "$key_path" \
+                    --arg listen_addr "$listen_addr" \
                 '{
                     type: "tuic",
                     tag: "tuic-in",
-                    listen: "::",
+                    listen: $listen_addr,
                     listen_port: $port,
                     users: [{uuid: $uuid, password: $password}],
                     congestion_control: "bbr",
@@ -3938,10 +3973,11 @@ generate_singbox_config() {
                     --arg method "$method" \
                     --arg password "$password" \
                     --arg tag "${p}-in" \
+                    --arg listen_addr "$listen_addr" \
                 '{
                     type: "shadowsocks",
                     tag: $tag,
-                    listen: "::",
+                    listen: $listen_addr,
                     listen_port: $port,
                     method: $method,
                     password: $password
@@ -4447,11 +4483,15 @@ gen_snell_server_config() {
     local psk="$1" port="$2" version="${3:-4}"
     mkdir -p "$CFG"
 
+    local listen_addr=$(_listen_addr)
+    local ipv6_enabled="false"
+    [[ "$listen_addr" == "::" ]] && ipv6_enabled="true"
+
     cat > "$CFG/snell.conf" << EOF
 [snell-server]
-listen = [::]:$port
+listen = $(_fmt_hostport "$listen_addr" "$port")
 psk = $psk
-ipv6 = true
+ipv6 = $ipv6_enabled
 obfs = off
 EOF
 
@@ -4704,12 +4744,16 @@ gen_snell_v5_server_config() {
     local psk="$1" port="$2" version="${3:-5}"
     mkdir -p "$CFG"
 
+    local listen_addr=$(_listen_addr)
+    local ipv6_enabled="false"
+    [[ "$listen_addr" == "::" ]] && ipv6_enabled="true"
+
     cat > "$CFG/snell-v5.conf" << EOF
 [snell-server]
-listen = [::]:$port
+listen = $(_fmt_hostport "$listen_addr" "$port")
 psk = $psk
 version = $version
-ipv6 = true
+ipv6 = $ipv6_enabled
 obfs = off
 EOF
 
