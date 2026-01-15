@@ -12277,84 +12277,83 @@ _import_alice_nodes() {
         _warn "没有成功导入任何节点"
     fi
 
+    # 如果成功导入节点,询问是否创建负载均衡组
     if [[ $imported -gt 0 ]]; then
         echo ""
-        echo -e "  ${Y}提示:${NC} 请到 ${C}分流规则${NC} 中配置使用这些节点"
-        echo -e "  ${Y}提示:${NC} 或使用 ${C}创建负载均衡组${NC} 来自动配置负载均衡"
+        _line
+        echo -e "  ${W}负载均衡配置${NC}"
+        echo ""
+
+        # 检查是否已存在 Alice 负载均衡组
+        local group_name="Alice-TW-SOCKS5-LB"
+        local existing_group=$(db_get_balancer_group "$group_name" 2>/dev/null)
+
+        if [[ -n "$existing_group" && "$existing_group" != "null" ]]; then
+            echo -e "  ${Y}⚠${NC}  已存在负载均衡组: ${C}$group_name${NC}"
+            local strategy=$(echo "$existing_group" | jq -r '.strategy')
+            local node_count=$(echo "$existing_group" | jq -r '.nodes | length')
+            echo -e "  策略: ${D}$strategy${NC}, 节点数: ${D}$node_count${NC}"
+            echo ""
+            echo -e "  ${W}选择操作:${NC}"
+            echo -e "    ${C}1.${NC} 保持现有配置 ${D}(不修改)${NC}"
+            echo -e "    ${C}2.${NC} 删除负载均衡组 ${D}(清除配置)${NC}"
+            echo -e "    ${C}3.${NC} 重新创建负载均衡组 ${D}(覆盖现有)${NC}"
+            echo ""
+
+            local choice
+            read -p "  请选择 [1-3, 默认 1]: " choice
+            choice=${choice:-1}
+
+            case "$choice" in
+                2)
+                    db_delete_balancer_group "$group_name"
+                    _ok "已删除负载均衡组: $group_name"
+                    echo ""
+                    echo -e "  ${Y}提示:${NC} 请到 ${C}分流规则${NC} 中手动配置节点"
+                    ;;
+                3)
+                    db_delete_balancer_group "$group_name"
+                    _create_alice_balancer_inline "$imported"
+                    ;;
+                *)
+                    _info "保持现有配置"
+                    ;;
+            esac
+        else
+            echo -e "  是否创建负载均衡组? ${D}(方便自动分配流量)${NC}"
+            echo ""
+            echo -e "    ${C}Y${NC} - 创建负载均衡组 ${D}(推荐)${NC}"
+            echo -e "    ${C}N${NC} - 稍后手动配置"
+            echo ""
+
+            local create_lb
+            read -p "  请选择 [Y/n]: " create_lb
+
+            if [[ ! "$create_lb" =~ ^[Nn]$ ]]; then
+                _create_alice_balancer_inline "$imported"
+            else
+                _info "跳过负载均衡配置"
+                echo ""
+                echo -e "  ${Y}提示:${NC} 请到 ${C}链式代理管理 → 创建负载均衡组${NC} 中配置"
+            fi
+        fi
     fi
+
     _pause
 }
 
-# 快速创建 Alice 负载均衡组
-_quick_setup_alice_balancer() {
-    _header
-    echo -e "  ${W}创建 Alice 负载均衡组${NC}"
-    _line
+# 内联创建 Alice 负载均衡组 (供导入流程调用)
+_create_alice_balancer_inline() {
+    local node_count=${1:-8}
 
-    # 获取所有以 Alice 开头的节点
-    local all_nodes=$(db_get_chain_nodes 2>/dev/null)
-    if [[ -z "$all_nodes" || "$all_nodes" == "[]" ]]; then
-        _warn "未找到任何链式代理节点"
-        echo ""
-        echo -e "  请先导入 Alice 节点"
-        _pause
-        return
-    fi
-
-    # 筛选 Alice 节点
-    local alice_nodes=()
-    while IFS= read -r node_name; do
-        [[ "$node_name" =~ ^Alice- ]] && alice_nodes+=("$node_name")
-    done < <(echo "$all_nodes" | jq -r '.[].name')
-
-    if [[ ${#alice_nodes[@]} -eq 0 ]]; then
-        _warn "未找到 Alice 节点"
-        echo ""
-        echo -e "  请先导入 Alice 节点"
-        _pause
-        return
-    fi
-
-    echo -e "  找到 ${G}${#alice_nodes[@]}${NC} 个 Alice 节点"
-    echo -e "  ${C}▸${NC} 正在检测延迟... (并发 ${LATENCY_PARALLEL})"
     echo ""
-
-    # 批量测速
-    local tmp_results=$(mktemp)
-    local tmp_nodes=$(mktemp)
-
-    # 为 Alice 节点创建临时 JSON 数组
-    for node_name in "${alice_nodes[@]}"; do
-        echo "$all_nodes" | jq -c --arg name "$node_name" '.[] | select(.name == $name)' >> "$tmp_nodes"
-    done
-
-    _batch_latency_nodes "$tmp_results" "$LATENCY_PARALLEL" < "$tmp_nodes"
-
-    echo -e "  ${W}节点列表 (按延迟排序):${NC}"
-    _line
-
-    # 显示节点及延迟信息
-    # _batch_latency_nodes 输出格式: latency_num|latency|name|type|server|port
-    while IFS='|' read -r latency_num latency name type server port; do
-        [[ -z "$name" ]] && continue
-        local latency_badge=$(_format_latency_badge "$latency")
-        local server_info="${D}(${server}:${port})${NC}"
-        printf "  ${C}•${NC} %-30s %b %b\n" "$name" "$latency_badge" "$server_info"
-    done < <(sort -t'|' -k1 -n "$tmp_results")
-
-    rm -f "$tmp_results" "$tmp_nodes"
-    echo ""
-
-    # 选择策略
-    echo -e "  ${W}选择负载均衡策略 (SOCKS5兼容):${NC}"
+    echo -e "  ${W}配置负载均衡策略:${NC}"
     echo -e "    ${C}1.${NC} random      ${D}(随机选择 - 推荐)${NC}"
     echo -e "    ${C}2.${NC} roundRobin  ${D}(轮询 - 流量均衡)${NC}"
     echo ""
-    echo -e "  ${D}提示: SOCKS5出站不支持leastPing延迟探测策略${NC}"
-    echo ""
 
     local strategy_choice
-    read -p "  请选择 [1-2, 默认 1]: " strategy_choice
+    read -p "  请选择策略 [1-2, 默认 1]: " strategy_choice
     strategy_choice=${strategy_choice:-1}
 
     local strategy
@@ -12363,36 +12362,26 @@ _quick_setup_alice_balancer() {
         *) strategy="random" ;;
     esac
 
-    # 组名
-    local group_name="Alice-TW-SOCKS5-LB"
-    if db_balancer_group_exists "$group_name"; then
-        _warn "负载均衡组 '$group_name' 已存在"
-        echo ""
-        read -p "  是否覆盖? [y/N]: " confirm
-        if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
-            _info "取消操作"
-            _pause
-            return
-        fi
-        db_delete_balancer_group "$group_name"
-    fi
+    # 获取所有 Alice 节点
+    local alice_nodes=()
+    local all_nodes=$(db_get_chain_nodes)
+    while IFS= read -r node_name; do
+        [[ "$node_name" =~ ^Alice-TW-SOCKS5- ]] && alice_nodes+=("$node_name")
+    done < <(echo "$all_nodes" | jq -r '.[].name')
 
     # 创建负载均衡组
+    local group_name="Alice-TW-SOCKS5-LB"
     db_add_balancer_group "$group_name" "$strategy" "${alice_nodes[@]}"
 
     echo ""
-    _line
-    _ok "负载均衡组 '$group_name' 创建成功"
+    _ok "负载均衡组创建成功"
     echo ""
+    echo -e "  组名: ${C}$group_name${NC}"
     echo -e "  策略: ${C}$strategy${NC}"
     echo -e "  节点数: ${G}${#alice_nodes[@]}${NC}"
     echo ""
-    echo -e "  ${Y}下一步:${NC}"
-    echo -e "  1. 到 ${C}分流规则${NC} 中添加规则"
-    echo -e "  2. 出口选择 ${C}负载均衡:${group_name}${NC}"
-    echo -e "  3. 重载配置以生效"
-
-    _pause
+    echo -e "  ${Y}下一步:${NC} 到 ${C}分流规则${NC} 中添加规则"
+    echo -e "  出口选择: ${C}负载均衡:${group_name}${NC}"
 }
 
 manage_chain_proxy() {
@@ -12434,10 +12423,9 @@ manage_chain_proxy() {
         _item "1" "添加节点 (分享链接)"
         _item "2" "导入订阅"
         _item "3" "一键导入 Alice SOCKS5 (8节点)"
-        _item "4" "创建 Alice 负载均衡组"
-        _item "5" "测试所有节点延迟"
-        _item "6" "删除节点"
-        _item "7" "禁用链式代理"
+        _item "4" "测试所有节点延迟"
+        _item "5" "删除节点"
+        _item "6" "禁用链式代理"
         _item "0" "返回"
         _line
 
@@ -12454,9 +12442,6 @@ manage_chain_proxy() {
                 _import_alice_nodes
                 ;;
             4)
-                _quick_setup_alice_balancer
-                ;;
-            5)
                 # 测试所有节点延迟
                 _header
                 echo -e "  ${W}测试节点延迟 ${D}(仅供参考)${NC}"
@@ -12503,7 +12488,7 @@ manage_chain_proxy() {
                 _line
                 _pause
                 ;;
-            6)
+            5)
                 _header
                 echo -e "  ${W}删除节点${NC}"
                 _line
@@ -12549,7 +12534,7 @@ manage_chain_proxy() {
                 fi
                 _pause
                 ;;
-            7)
+            6)
                 local tmp=$(mktemp)
                 jq 'del(.chain_proxy.active)' "$DB_FILE" > "$tmp" && mv "$tmp" "$DB_FILE"
                 _ok "已禁用链式代理"
