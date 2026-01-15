@@ -750,9 +750,28 @@ generate_xray_config() {
                 done < <(echo "$group_json" | jq -r '.nodes[]?')
                 
                 # 生成 balancer 配置
+                # 检查出站协议类型,SOCKS5/HTTP不支持leastPing/leastLoad,自动降级为random
+                local final_strategy="$strategy"
+                if [[ "$strategy" == "leastPing" || "$strategy" == "leastLoad" ]]; then
+                    # 检查selector中的节点是否包含SOCKS5/HTTP协议
+                    local has_incompatible=false
+                    while IFS= read -r check_tag; do
+                        [[ -z "$check_tag" ]] && continue
+                        if echo "$outbounds" | jq -e --arg tag "$check_tag" '.[] | select(.tag == $tag and (.protocol == "socks" or .protocol == "http"))' >/dev/null 2>&1; then
+                            has_incompatible=true
+                            break
+                        fi
+                    done < <(echo "$selectors" | jq -r '.[]?')
+
+                    if [[ "$has_incompatible" == "true" ]]; then
+                        _warn "检测到SOCKS5/HTTP出站,${strategy}策略不支持,自动切换为random策略"
+                        final_strategy="random"
+                    fi
+                fi
+
                 local balancer=$(jq -n \
                     --arg tag "balancer-${group_name}" \
-                    --arg strategy "$strategy" \
+                    --arg strategy "$final_strategy" \
                     --argjson selector "$selectors" \
                     '{tag: $tag, selector: $selector, strategy: {type: $strategy}}')
                 
@@ -8612,7 +8631,8 @@ db_clear_routing_rules() {
 
 # 数据库：添加负载均衡组
 # 用法: db_add_balancer_group "组名" "策略" "节点1" "节点2" ...
-# 策略: random(随机), leastPing(最低延迟), roundRobin(轮询)
+# 策略: random(随机), roundRobin(轮询)
+# 注意: leastPing/leastLoad不支持SOCKS5/HTTP出站,配置生成时会自动降级为random
 db_add_balancer_group() {
     local name="$1" strategy="$2"
     shift 2
@@ -12326,21 +12346,21 @@ _quick_setup_alice_balancer() {
     echo ""
 
     # 选择策略
-    echo -e "  ${W}选择负载均衡策略:${NC}"
-    echo -e "    ${C}1.${NC} random      ${D}(随机选择)${NC}"
-    echo -e "    ${C}2.${NC} leastPing   ${D}(最低延迟)${NC}"
-    echo -e "    ${C}3.${NC} roundRobin  ${D}(轮询)${NC}"
+    echo -e "  ${W}选择负载均衡策略 (SOCKS5兼容):${NC}"
+    echo -e "    ${C}1.${NC} random      ${D}(随机选择 - 推荐)${NC}"
+    echo -e "    ${C}2.${NC} roundRobin  ${D}(轮询 - 流量均衡)${NC}"
+    echo ""
+    echo -e "  ${D}提示: SOCKS5出站不支持leastPing延迟探测策略${NC}"
     echo ""
 
     local strategy_choice
-    read -p "  请选择 [1-3, 默认 2]: " strategy_choice
-    strategy_choice=${strategy_choice:-2}
+    read -p "  请选择 [1-2, 默认 1]: " strategy_choice
+    strategy_choice=${strategy_choice:-1}
 
     local strategy
     case "$strategy_choice" in
-        1) strategy="random" ;;
-        3) strategy="roundRobin" ;;
-        *) strategy="leastPing" ;;
+        2) strategy="roundRobin" ;;
+        *) strategy="random" ;;
     esac
 
     # 组名
