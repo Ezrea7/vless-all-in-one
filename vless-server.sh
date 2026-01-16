@@ -4461,8 +4461,10 @@ _install_binary() {
 
     # 安全地构建 URL（避免 eval）
     local url="${url_pattern//\$version/$version}"
+    url="${url//\$\{version\}/$version}"
     url="${url//\$\{xarch\}/$xarch}"
     url="${url//\$\{sarch\}/$sarch}"
+    url="${url//\$\{aarch\}/$aarch}"
 
     # 下载并验证
     if ! curl -fsSL --connect-timeout 60 --retry 2 -o "$tmp/pkg" "$url"; then
