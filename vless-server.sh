@@ -386,23 +386,51 @@ _is_real_cert() {
     [[ "$issuer" == *"E1"* ]] || [[ "$issuer" == *"ZeroSSL"* ]] || [[ "$issuer" == *"Buypass"* ]]
 }
 
+# 获取 Nginx HTTP 配置目录（确保 server 块可用）
+_get_nginx_http_conf_dir() {
+    if [[ -d "/etc/nginx/http.d" ]]; then
+        echo "/etc/nginx/http.d"
+        return 0
+    fi
+    if [[ -d "/etc/nginx/sites-available" ]]; then
+        echo "/etc/nginx/sites-available"
+        return 0
+    fi
+    if [[ -d "/etc/nginx/conf.d" ]]; then
+        echo "/etc/nginx/conf.d"
+        return 0
+    fi
+    mkdir -p "/etc/nginx/conf.d"
+    echo "/etc/nginx/conf.d"
+}
+
+# 生成 Nginx HTTP 配置文件路径（sites-available 不带 .conf）
+_get_nginx_http_conf_file() {
+    local name="$1"
+    local dir="$(_get_nginx_http_conf_dir)"
+    if [[ "$dir" == "/etc/nginx/sites-available" ]]; then
+        echo "$dir/$name"
+        return 0
+    fi
+    echo "$dir/$name.conf"
+}
+
+# 移除指定 Nginx 配置（覆盖 conf.d/http.d/sites-available/sites-enabled）
+_remove_nginx_conf_files() {
+    local name="$1"
+    rm -f \
+        "/etc/nginx/conf.d/${name}.conf" \
+        "/etc/nginx/http.d/${name}.conf" \
+        "/etc/nginx/sites-available/${name}" \
+        "/etc/nginx/sites-enabled/${name}" 2>/dev/null
+}
+
 # 确保 Nginx HTTPS 监听存在 (真实域名模式，供 Reality dest 回落)
 # 用法: _ensure_nginx_https_for_reality "domain.com"
 _ensure_nginx_https_for_reality() {
     local domain="$1"
     local nginx_https_port=8443
-    local nginx_conf=""
-    
-    # 确定 nginx 配置文件路径
-    if [[ -d "/etc/nginx/conf.d" ]]; then
-        nginx_conf="/etc/nginx/conf.d/vless-reality-https.conf"
-    elif [[ -d "/etc/nginx/sites-available" ]]; then
-        nginx_conf="/etc/nginx/sites-available/vless-reality-https"
-    elif [[ -d "/etc/nginx/http.d" ]]; then
-        nginx_conf="/etc/nginx/http.d/vless-reality-https.conf"
-    else
-        return 1
-    fi
+    local nginx_conf="$(_get_nginx_http_conf_file "vless-reality-https")"
     
     # 检查 8443 端口是否已被 nginx 监听
     if ss -tln 2>/dev/null | grep -q ":${nginx_https_port} "; then
@@ -2431,28 +2459,12 @@ create_fake_website() {
     local web_dir="/var/www/html"
     
     # 根据系统确定 nginx 配置目录
-    local nginx_conf_dir=""
-    local nginx_conf_file=""
-    if [[ -d "/etc/nginx/sites-available" ]]; then
-        nginx_conf_dir="/etc/nginx/sites-available"
-        nginx_conf_file="$nginx_conf_dir/vless-fake"
-    elif [[ -d "/etc/nginx/conf.d" ]]; then
-        nginx_conf_dir="/etc/nginx/conf.d"
-        nginx_conf_file="$nginx_conf_dir/vless-fake.conf"
-    elif [[ -d "/etc/nginx/http.d" ]]; then
-        # Alpine
-        nginx_conf_dir="/etc/nginx/http.d"
-        nginx_conf_file="$nginx_conf_dir/vless-fake.conf"
-    else
-        nginx_conf_dir="/etc/nginx/conf.d"
-        nginx_conf_file="$nginx_conf_dir/vless-fake.conf"
-        mkdir -p "$nginx_conf_dir"
-    fi
+    local nginx_conf_dir="$(_get_nginx_http_conf_dir)"
+    local nginx_conf_file="$(_get_nginx_http_conf_file "vless-fake")"
     
     # 删除旧配置，确保使用最新配置
-    rm -f "$nginx_conf_file" /etc/nginx/sites-enabled/vless-fake 2>/dev/null
-    # 同时删除可能冲突的 vless-sub.conf
-    rm -f /etc/nginx/conf.d/vless-sub.conf 2>/dev/null
+    _remove_nginx_conf_files "vless-fake"
+    _remove_nginx_conf_files "vless-sub"
     
     # 创建网页目录
     mkdir -p "$web_dir"
@@ -2718,9 +2730,9 @@ EOF
         
         # 如果使用 sites-available 模式，创建软链接
         if [[ "$nginx_conf_dir" == "/etc/nginx/sites-available" ]]; then
-            mkdir -p /etc/nginx/sites-enabled
-            rm -f /etc/nginx/sites-enabled/default
-            ln -sf "$nginx_conf_file" /etc/nginx/sites-enabled/vless-fake
+            mkdir -p "/etc/nginx/sites-enabled"
+            rm -f "/etc/nginx/sites-enabled/default"
+            ln -sf "$nginx_conf_file" "/etc/nginx/sites-enabled/vless-fake"
         fi
         
         # 测试Nginx配置
@@ -2781,7 +2793,7 @@ EOF
             _warn "Nginx配置测试失败"
             echo "配置错误详情："
             nginx -t
-            rm -f "$nginx_conf_file" /etc/nginx/sites-enabled/vless-fake 2>/dev/null
+            _remove_nginx_conf_files "vless-fake"
         fi
         
         # 保存订阅配置信息
@@ -3705,8 +3717,9 @@ setup_cert_and_nginx() {
                 _ok "使用证书域名: $CERT_DOMAIN"
                 
                 # 检查 Nginx 配置文件是否存在
+                local nginx_conf_file="$(_get_nginx_http_conf_file "vless-fake")"
                 local nginx_conf_exists=false
-                if [[ -f "/etc/nginx/conf.d/vless-fake.conf" ]] || [[ -f "/etc/nginx/sites-available/vless-fake" ]]; then
+                if [[ -f "$nginx_conf_file" ]]; then
                     nginx_conf_exists=true
                 fi
                 
@@ -3725,9 +3738,7 @@ setup_cert_and_nginx() {
                 else
                     # 检查 Nginx 配置是否有正确的订阅路由 (使用 alias 指向 subscription 目录)
                     local nginx_conf_valid=false
-                    if grep -q "alias.*subscription" "/etc/nginx/conf.d/vless-fake.conf" 2>/dev/null; then
-                        nginx_conf_valid=true
-                    elif grep -q "alias.*subscription" "/etc/nginx/sites-available/vless-fake" 2>/dev/null; then
+                    if grep -q "alias.*subscription" "$nginx_conf_file" 2>/dev/null; then
                         nginx_conf_valid=true
                     fi
                     
@@ -14524,8 +14535,8 @@ uninstall_specific_protocol() {
     if [[ "$has_sub_protocol" == "false" ]]; then
         _info "清理订阅服务..."
         # 停止并删除 Nginx 订阅配置
-        rm -f /etc/nginx/conf.d/vless-sub.conf
-        rm -f /etc/nginx/conf.d/vless-fake.conf
+        _remove_nginx_conf_files "vless-sub"
+        _remove_nginx_conf_files "vless-fake"
         nginx -s reload 2>/dev/null
         # 清理订阅目录和配置
         rm -rf "$CFG/subscription"
@@ -17612,7 +17623,7 @@ setup_nginx_sub() {
 
     generate_sub_files
     local sub_dir="$CFG/subscription/$sub_uuid"
-    local fake_conf="/etc/nginx/conf.d/vless-fake.conf"
+    local fake_conf="$(_get_nginx_http_conf_file "vless-fake")"
 
     # 检查现有配置：已存在且路由正确则直接复用
     if [[ -f "$fake_conf" ]] &&
@@ -17623,9 +17634,10 @@ setup_nginx_sub() {
     fi
 
     local cert_file="$CFG/certs/server.crt" key_file="$CFG/certs/server.key"
-    local nginx_conf="/etc/nginx/conf.d/vless-sub.conf"
-    rm -f "$nginx_conf" 2>/dev/null
-    mkdir -p /etc/nginx/conf.d
+    local nginx_conf_dir="$(_get_nginx_http_conf_dir)"
+    local nginx_conf="$(_get_nginx_http_conf_file "vless-sub")"
+    _remove_nginx_conf_files "vless-sub"
+    mkdir -p "$nginx_conf_dir"
 
     if [[ "$use_https" == "true" && ( ! -f "$cert_file" || ! -f "$key_file" ) ]]; then
         _warn "证书不存在，生成自签名证书..."
@@ -17689,6 +17701,11 @@ $ssl_block
 }
 EOF
 
+    if [[ "$nginx_conf_dir" == "/etc/nginx/sites-available" ]]; then
+        mkdir -p "/etc/nginx/sites-enabled"
+        ln -sf "$nginx_conf" "/etc/nginx/sites-enabled/vless-sub"
+    fi
+
     if nginx -t 2>/dev/null; then
         if [[ "$DISTRO" == "alpine" ]]; then
             rc-service nginx restart 2>/dev/null || nginx -s reload
@@ -17700,7 +17717,7 @@ EOF
     fi
 
     _err "Nginx 配置错误"
-    rm -f "$nginx_conf"
+    _remove_nginx_conf_files "vless-sub"
     return 1
 }
 
@@ -17778,7 +17795,8 @@ manage_subscription() {
                 3) manage_external_nodes ;;
                 4) setup_subscription_interactive ;;
                 5) 
-                    rm -f /etc/nginx/conf.d/vless-sub.conf "$CFG/sub.info"
+                    _remove_nginx_conf_files "vless-sub"
+                    rm -f "$CFG/sub.info"
                     rm -rf "$CFG/subscription"
                     nginx -s reload 2>/dev/null
                     _ok "订阅服务已停用"
@@ -17868,12 +17886,13 @@ setup_subscription_interactive() {
     local server_name="${sub_domain:-$(get_ipv4)}"
     
     # 配置 Nginx
-    local nginx_conf="/etc/nginx/conf.d/vless-sub.conf"
-    mkdir -p /etc/nginx/conf.d
+    local nginx_conf_dir="$(_get_nginx_http_conf_dir)"
+    local nginx_conf="$(_get_nginx_http_conf_file "vless-sub")"
+    mkdir -p "$nginx_conf_dir"
     
     # 删除可能冲突的旧配置
-    rm -f /etc/nginx/conf.d/vless-fake.conf 2>/dev/null
-    rm -f /etc/nginx/sites-enabled/vless-fake 2>/dev/null
+    _remove_nginx_conf_files "vless-fake"
+    _remove_nginx_conf_files "vless-sub"
     
     if [[ "$use_https" == "true" ]]; then
         # HTTPS 模式：需要证书
@@ -17963,6 +17982,11 @@ server {
 }
 EOF
     fi
+
+    if [[ "$nginx_conf_dir" == "/etc/nginx/sites-available" ]]; then
+        mkdir -p "/etc/nginx/sites-enabled"
+        ln -sf "$nginx_conf" "/etc/nginx/sites-enabled/vless-sub"
+    fi
     
     # 确保伪装网页存在
     mkdir -p /var/www/html
@@ -18012,7 +18036,7 @@ EOF
     else
         _err "Nginx 配置错误"
         nginx -t
-        rm -f "$nginx_conf"
+        _remove_nginx_conf_files "vless-sub"
         _pause
         return
     fi
