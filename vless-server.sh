@@ -1,6 +1,6 @@
 #!/bin/bash
 #═══════════════════════════════════════════════════════════════════════════════
-#  多协议代理一键部署脚本 v3.4.3 [服务端]
+#  多协议代理一键部署脚本 v3.4.4 [服务端]
 #  
 #  架构升级:
 #    • Xray 核心: 处理 TCP/TLS 协议 (VLESS/VMess/Trojan/SOCKS/SS2022)
@@ -17,7 +17,7 @@
 #  项目地址: https://github.com/Chil30/vless-all-in-one
 #═══════════════════════════════════════════════════════════════════════════════
 
-readonly VERSION="3.4.3"
+readonly VERSION="3.4.4"
 readonly AUTHOR="Chil30"
 readonly REPO_URL="https://github.com/Chil30/vless-all-in-one"
 readonly SCRIPT_REPO="Chil30/vless-all-in-one"
@@ -2724,17 +2724,44 @@ generate_xray_config() {
                 outbounds: $outbounds,
                 routing: {domainStrategy: "IPIfNonMatch", rules: $rules, balancers: $balancers}
             }' > "$CFG/config.json"
+            
+            # 添加多IP路由 outbound 支持（routing 规则将在 inbound 添加完成后统一添加）
+            local ip_routing_outbounds=$(gen_xray_ip_routing_outbounds)
+            if [[ -n "$ip_routing_outbounds" && "$ip_routing_outbounds" != "[]" ]]; then
+                local tmp=$(mktemp)
+                jq --argjson ip_outs "$ip_routing_outbounds" '.outbounds += $ip_outs' "$CFG/config.json" > "$tmp" && mv "$tmp" "$CFG/config.json"
+            fi
         else
-            # 无任何路由规则，使用简单直连配置（仍需要 API 规则）
-            jq -n --argjson direct "$direct_outbound" '{
-                log: {loglevel: "warning", access: "/var/log/xray/access.log", error: "/var/log/xray/error.log"},
-                api: {tag: "api", services: ["StatsService"]},
-                stats: {},
-                policy: {levels: {"0": {statsUserUplink: true, statsUserDownlink: true}}},
-                inbounds: [{listen: "127.0.0.1", port: 10085, protocol: "dokodemo-door", settings: {address: "127.0.0.1"}, tag: "api"}],
-                outbounds: [$direct, {protocol: "blackhole", tag: "api"}],
-                routing: {domainStrategy: "IPIfNonMatch", rules: [{type: "field", inboundTag: ["api"], outboundTag: "api"}]}
-            }' > "$CFG/config.json"
+            # 无任何用户路由规则时
+            # 先检查是否有多IP路由的 outbound 需要添加
+            local ip_routing_outbounds=$(gen_xray_ip_routing_outbounds)
+            
+            if [[ -n "$ip_routing_outbounds" && "$ip_routing_outbounds" != "[]" ]]; then
+                # 有多IP路由，生成包含多IP路由 outbound 的配置
+                # routing 规则将在 inbound 添加完成后统一添加
+                local all_outbounds=$(echo "[$direct_outbound]" | jq --argjson ip_outs "$ip_routing_outbounds" '. + $ip_outs + [{protocol: "blackhole", tag: "api"}]')
+                
+                jq -n --argjson outbounds "$all_outbounds" '{
+                    log: {loglevel: "warning", access: "/var/log/xray/access.log", error: "/var/log/xray/error.log"},
+                    api: {tag: "api", services: ["StatsService"]},
+                    stats: {},
+                    policy: {levels: {"0": {statsUserUplink: true, statsUserDownlink: true}}},
+                    inbounds: [{listen: "127.0.0.1", port: 10085, protocol: "dokodemo-door", settings: {address: "127.0.0.1"}, tag: "api"}],
+                    outbounds: $outbounds,
+                    routing: {domainStrategy: "IPIfNonMatch", rules: [{"type": "field", "inboundTag": ["api"], "outboundTag": "api"}]}
+                }' > "$CFG/config.json"
+            else
+                # 无任何路由规则，使用简单直连配置（仍需要 API 规则）
+                jq -n --argjson direct "$direct_outbound" '{
+                    log: {loglevel: "warning", access: "/var/log/xray/access.log", error: "/var/log/xray/error.log"},
+                    api: {tag: "api", services: ["StatsService"]},
+                    stats: {},
+                    policy: {levels: {"0": {statsUserUplink: true, statsUserDownlink: true}}},
+                    inbounds: [{listen: "127.0.0.1", port: 10085, protocol: "dokodemo-door", settings: {address: "127.0.0.1"}, tag: "api"}],
+                    outbounds: [$direct, {protocol: "blackhole", tag: "api"}],
+                    routing: {domainStrategy: "IPIfNonMatch", rules: [{"type": "field", "inboundTag": ["api"], "outboundTag": "api"}]}
+                }' > "$CFG/config.json"
+            fi
         fi
     fi
     
@@ -2806,6 +2833,23 @@ generate_xray_config() {
     if [[ "$inbound_count" == "0" || -z "$inbound_count" ]]; then
         _err "Xray 配置中没有有效的 inbound"
         return 1
+    fi
+    
+    # 多IP路由：在所有 inbound 添加完成后，更新 routing 规则
+    # 因为 routing 规则需要知道实际生成的 inbound tag
+    if db_ip_routing_enabled; then
+        local inbounds_json=$(jq '.inbounds' "$CFG/config.json" 2>/dev/null || echo "[]")
+        local ip_routing_rules=$(gen_xray_ip_routing_rules "$inbounds_json")
+        
+        if [[ -n "$ip_routing_rules" && "$ip_routing_rules" != "[]" ]]; then
+            local tmp=$(mktemp)
+            # 将多IP路由规则放在 routing.rules 最前面（在 api 规则之后）
+            jq --argjson ip_rules "$ip_routing_rules" '
+                .routing.rules = (
+                    [.routing.rules[0]] + $ip_rules + .routing.rules[1:]
+                )
+            ' "$CFG/config.json" > "$tmp" && mv "$tmp" "$CFG/config.json"
+        fi
     fi
     
     if [[ -n "$failed_protocols" ]]; then
@@ -3324,13 +3368,45 @@ add_xray_inbound_v2() {
     local tmp_config=$(mktemp)
     if jq '.inbounds += [input]' "$CFG/config.json" "$tmp_inbound" > "$tmp_config" 2>/dev/null; then
         mv "$tmp_config" "$CFG/config.json"
-        rm -f "$tmp_inbound"
-        return 0
     else
         _err "合并 $protocol 配置失败"
         rm -f "$tmp_inbound" "$tmp_config"
         return 1
     fi
+    
+    # 多IP路由支持：为每个配置的入站IP创建独立的 inbound 副本
+    # 这样 routing 规则可以通过 inboundTag 匹配到正确的出站
+    if db_ip_routing_enabled; then
+        local ip_rules=$(db_get_ip_routing_rules)
+        if [[ -n "$ip_rules" && "$ip_rules" != "[]" ]]; then
+            while IFS= read -r rule; do
+                [[ -z "$rule" ]] && continue
+                local inbound_ip=$(echo "$rule" | jq -r '.inbound_ip')
+                [[ -z "$inbound_ip" ]] && continue
+                
+                # 为该入站IP创建专用的 inbound 副本
+                # tag 需要包含端口号，避免多协议时 tag 冲突
+                local ip_tag="ip-in-${inbound_ip//[.:]/-}-${port}"
+                local ip_inbound_file=$(mktemp)
+                
+                # 复制原始 inbound，修改 listen 和 tag
+                jq --arg listen "$inbound_ip" --arg tag "$ip_tag" \
+                    '.listen = $listen | .tag = $tag' "$tmp_inbound" > "$ip_inbound_file"
+                
+                if jq empty "$ip_inbound_file" 2>/dev/null; then
+                    local tmp2=$(mktemp)
+                    if jq '.inbounds += [input]' "$CFG/config.json" "$ip_inbound_file" > "$tmp2" 2>/dev/null; then
+                        mv "$tmp2" "$CFG/config.json"
+                    fi
+                    rm -f "$tmp2"
+                fi
+                rm -f "$ip_inbound_file"
+            done < <(echo "$ip_rules" | jq -c '.[]')
+        fi
+    fi
+    
+    rm -f "$tmp_inbound"
+    return 0
 }
 
 #═══════════════════════════════════════════════════════════════════════════════
@@ -9277,13 +9353,14 @@ create_service() {
     }
     
     # 获取协议配置所在的核心
+    # 与 register_protocol 保持一致：SINGBOX_PROTOCOLS 以外的协议都保存在 xray 核心
     _get_proto_core() {
         local proto="$1"
-        # ss2022-shadowtls 保存在 xray 核心
-        if [[ "$proto" == "ss2022-shadowtls" ]]; then
-            echo "xray"
-        else
+        # 只有 hy2/tuic 保存在 singbox 核心，其他协议（包括所有 shadowtls）都在 xray
+        if [[ " $SINGBOX_PROTOCOLS " == *" $proto "* ]]; then
             echo "singbox"
+        else
+            echo "xray"
         fi
     }
 
@@ -11328,6 +11405,7 @@ gen_xray_ip_routing_outbounds() {
 }
 
 # 生成多IP路由的routing规则 (根据入站IP路由到对应出站)
+# 参数: $1 = inbounds JSON 数组（可选，如果提供则从中提取匹配的 tag）
 gen_xray_ip_routing_rules() {
     # 检查是否启用多IP路由
     db_ip_routing_enabled || return
@@ -11335,6 +11413,7 @@ gen_xray_ip_routing_rules() {
     local rules=$(db_get_ip_routing_rules)
     [[ -z "$rules" || "$rules" == "[]" ]] && return
     
+    local inbounds_json="${1:-}"
     local result="[]"
     
     while IFS= read -r rule; do
@@ -11343,17 +11422,28 @@ gen_xray_ip_routing_rules() {
         local outbound_ip=$(echo "$rule" | jq -r '.outbound_ip')
         [[ -z "$inbound_ip" || -z "$outbound_ip" ]] && continue
         
-        # 生成routing规则：匹配入站IP的流量路由到对应出站
-        local inbound_tag="ip-in-${inbound_ip//[.:]/-}"
         local outbound_tag="direct-ip-${outbound_ip//[.:]/-}"
+        local inbound_tag_prefix="ip-in-${inbound_ip//[.:]/-}-"
         
-        # 使用 source 字段匹配入站源IP (即监听IP)
-        # 注意: Xray routing 的 source 是匹配客户端IP，不是入站IP
-        # 正确做法是使用 inboundTag 匹配
-        result=$(echo "$result" | jq --arg in_tag "$inbound_tag" --arg out_tag "$outbound_tag" '
+        # 收集所有匹配该入站IP的 inbound tag
+        local matching_tags="[]"
+        if [[ -n "$inbounds_json" && "$inbounds_json" != "[]" ]]; then
+            # 从提供的 inbounds 中筛选匹配的 tag
+            matching_tags=$(echo "$inbounds_json" | jq --arg prefix "$inbound_tag_prefix" '[.[] | select(.tag | startswith($prefix)) | .tag]')
+        fi
+        
+        # 如果没有从参数获取到，尝试从现有配置文件读取
+        if [[ "$matching_tags" == "[]" && -f "$CFG/config.json" ]]; then
+            matching_tags=$(jq --arg prefix "$inbound_tag_prefix" '[.inbounds[]? | select(.tag | startswith($prefix)) | .tag]' "$CFG/config.json" 2>/dev/null || echo "[]")
+        fi
+        
+        # 如果仍然没有匹配的 tag，跳过这条规则
+        [[ "$matching_tags" == "[]" || -z "$matching_tags" ]] && continue
+        
+        result=$(echo "$result" | jq --argjson tags "$matching_tags" --arg out_tag "$outbound_tag" '
             . + [{
                 "type": "field",
-                "inboundTag": [$in_tag],
+                "inboundTag": $tags,
                 "outboundTag": $out_tag
             }]
         ')
@@ -12695,8 +12785,9 @@ manage_routing() {
         _item "2" "链式代理"
         _item "3" "配置分流规则"
         _item "4" "直连出口设置"
-        _item "5" "测试分流效果"
-        _item "6" "查看当前配置"
+        _item "5" "多IP入出站配置"
+        _item "6" "测试分流效果"
+        _item "7" "查看当前配置"
         _item "0" "返回"
         _line
         
@@ -12707,13 +12798,14 @@ manage_routing() {
             2) manage_chain_proxy ;;
             3) configure_routing_rules ;;
             4) configure_direct_outbound ;;
-            5)
+            5) manage_ip_routing ;;
+            6)
                 _header
                 echo -e "  ${W}测试分流效果${NC}"
                 test_routing
                 _pause
                 ;;
-            6)
+            7)
                 _header
                 echo -e "  ${W}当前分流配置${NC}"
                 _line
@@ -20250,6 +20342,10 @@ readonly CLOUDFLARED_DIR="/etc/cloudflared"
 readonly CLOUDFLARED_CONFIG="$CLOUDFLARED_DIR/config.yml"
 readonly CLOUDFLARED_SERVICE="cloudflared"
 
+# cloudflared 全局参数（支持 IPv6-only 机器）
+# --edge-ip-version auto: 让 cloudflared 自动选择 IPv4/IPv6 连接 Cloudflare 边缘
+readonly CLOUDFLARED_EDGE_OPTS="--edge-ip-version auto"
+
 # 检测 cloudflared 是否已安装
 _is_cloudflared_installed() {
     [[ -x "$CLOUDFLARED_BIN" ]] && return 0
@@ -20461,7 +20557,7 @@ cloudflared_login() {
     echo ""
     
     # 运行登录命令
-    "$CLOUDFLARED_BIN" tunnel login
+    "$CLOUDFLARED_BIN" $CLOUDFLARED_EDGE_OPTS tunnel login
     
     if [[ -f "$HOME/.cloudflared/cert.pem" ]]; then
         # 移动证书到配置目录
@@ -20494,9 +20590,26 @@ create_tunnel_interactive() {
         return 1
     fi
     
-    # 检查现有隧道
+    # 检查现有隧道（本地配置）
     local existing_tunnel=$(_get_tunnel_name)
     local need_create=true
+    
+    # 同时检查 Cloudflare 远程是否有隧道（本地配置可能已丢失）
+    if [[ -z "$existing_tunnel" ]]; then
+        _info "检查 Cloudflare 账户中的隧道..."
+        local remote_tunnels=$("$CLOUDFLARED_BIN" $CLOUDFLARED_EDGE_OPTS tunnel list 2>/dev/null)
+        # 提取隧道名称（跳过表头和提示信息）
+        local tunnel_names=$(echo "$remote_tunnels" | grep -E "^[a-f0-9-]{36}" | awk '{print $2}' | head -5)
+        if [[ -n "$tunnel_names" ]]; then
+            echo ""
+            echo -e "  ${Y}Cloudflare 账户中已有隧道:${NC}"
+            echo "$tunnel_names" | while read tname; do
+                echo -e "    ${D}• $tname${NC}"
+            done
+            echo ""
+            echo -e "  ${D}提示: 使用相同名称会创建失败，请选择不同的名称${NC}"
+        fi
+    fi
     
     if [[ -n "$existing_tunnel" ]]; then
         echo -e "  ${Y}检测到已有隧道: $existing_tunnel${NC}"
@@ -20514,7 +20627,7 @@ create_tunnel_interactive() {
             2)
                 _info "删除现有隧道..."
                 _stop_tunnel_service 2>/dev/null
-                "$CLOUDFLARED_BIN" tunnel delete "$existing_tunnel" 2>/dev/null
+                "$CLOUDFLARED_BIN" $CLOUDFLARED_EDGE_OPTS tunnel delete "$existing_tunnel" 2>/dev/null
                 rm -f "$CLOUDFLARED_DIR/tunnel.info"
                 rm -f "$CLOUDFLARED_DIR/config.yml"
                 rm -f "$CLOUDFLARED_DIR"/*.json
@@ -20534,7 +20647,7 @@ create_tunnel_interactive() {
         tunnel_name="${tunnel_name:-$default_name}"
         
         _info "创建隧道..."
-        local output=$("$CLOUDFLARED_BIN" tunnel create "$tunnel_name" 2>&1)
+        local output=$("$CLOUDFLARED_BIN" $CLOUDFLARED_EDGE_OPTS tunnel create "$tunnel_name" 2>&1)
         
         if echo "$output" | grep -q "Created tunnel"; then
             local tunnel_id=$(echo "$output" | grep -oP '[a-f0-9-]{36}' | head -1)
@@ -20554,9 +20667,102 @@ EOF
             _ok "隧道创建成功"
             echo -e "  隧道名称: ${G}$tunnel_name${NC}"
             echo -e "  隧道 ID: ${G}$tunnel_id${NC}"
+        elif echo "$output" | grep -q "tunnel with name already exists"; then
+            # 隧道已存在于 Cloudflare，尝试同步到本地
+            echo ""
+            echo -e "  ${Y}隧道 '$tunnel_name' 已存在于 Cloudflare 账户中${NC}"
+            echo ""
+            echo -e "  ${G}1${NC}) 同步已有隧道到本地（复用）"
+            echo -e "  ${G}2${NC}) 删除远程隧道并重新创建"
+            echo -e "  ${G}3${NC}) 使用其他名称创建"
+            echo -e "  ${G}0${NC}) 取消"
+            echo ""
+            read -rp "  请选择: " exist_choice
+            
+            case "$exist_choice" in
+                1)
+                    # 同步已有隧道
+                    _info "同步隧道信息..."
+                    local tunnel_info=$("$CLOUDFLARED_BIN" $CLOUDFLARED_EDGE_OPTS tunnel list 2>/dev/null | grep "$tunnel_name")
+                    local tunnel_id=$(echo "$tunnel_info" | awk '{print $1}')
+                    if [[ -n "$tunnel_id" && "$tunnel_id" =~ ^[a-f0-9-]{36}$ ]]; then
+                        cat > "$CLOUDFLARED_DIR/tunnel.info" << EOF
+tunnel_name=$tunnel_name
+tunnel_id=$tunnel_id
+created=$(date '+%Y-%m-%d %H:%M:%S')
+synced=true
+EOF
+                        # 尝试下载凭证
+                        if [[ ! -f "$CLOUDFLARED_DIR/$tunnel_id.json" ]]; then
+                            _warn "凭证文件不存在，需要重新创建隧道或手动恢复凭证"
+                            echo -e "  ${D}提示: 隧道凭证在创建时生成，无法重新下载${NC}"
+                            echo -e "  ${D}      建议选择 2 删除后重新创建${NC}"
+                            _pause
+                            return 1
+                        fi
+                        _ok "隧道同步成功"
+                        echo -e "  隧道 ID: ${G}$tunnel_id${NC}"
+                    else
+                        _err "无法获取隧道信息"
+                        _pause
+                        return 1
+                    fi
+                    ;;
+                2)
+                    # 删除远程隧道
+                    _info "删除远程隧道..."
+                    if "$CLOUDFLARED_BIN" $CLOUDFLARED_EDGE_OPTS tunnel delete "$tunnel_name" 2>&1; then
+                        _ok "远程隧道已删除"
+                        # 递归调用重新创建
+                        create_tunnel_interactive
+                        return $?
+                    else
+                        _err "删除失败"
+                        _pause
+                        return 1
+                    fi
+                    ;;
+                3)
+                    # 重新选择名称
+                    echo ""
+                    read -rp "  请输入新的隧道名称: " new_name
+                    if [[ -n "$new_name" ]]; then
+                        tunnel_name="$new_name"
+                        # 递归创建（简化处理）
+                        local output2=$("$CLOUDFLARED_BIN" $CLOUDFLARED_EDGE_OPTS tunnel create "$tunnel_name" 2>&1)
+                        if echo "$output2" | grep -q "Created tunnel"; then
+                            local tunnel_id=$(echo "$output2" | grep -oP '[a-f0-9-]{36}' | head -1)
+                            cat > "$CLOUDFLARED_DIR/tunnel.info" << EOF
+tunnel_name=$tunnel_name
+tunnel_id=$tunnel_id
+created=$(date '+%Y-%m-%d %H:%M:%S')
+EOF
+                            [[ -f "$HOME/.cloudflared/$tunnel_id.json" ]] && mv "$HOME/.cloudflared/$tunnel_id.json" "$CLOUDFLARED_DIR/"
+                            _ok "隧道创建成功"
+                            echo -e "  隧道 ID: ${G}$tunnel_id${NC}"
+                        else
+                            _err "创建失败"
+                            echo "$output2"
+                            _pause
+                            return 1
+                        fi
+                    else
+                        return 0
+                    fi
+                    ;;
+                *)
+                    return 0
+                    ;;
+            esac
         else
             _err "隧道创建失败"
+            echo ""
+            echo -e "  ${Y}错误输出:${NC}"
             echo "$output"
+            echo ""
+            echo -e "  ${D}提示: 如果是纯 IPv6 机器，请确保 cloudflared 版本 >= 2023.3.0${NC}"
+            echo -e "  ${D}      可以尝试手动执行: cloudflared --edge-ip-version 6 tunnel create test${NC}"
+            _pause
             return 1
         fi
     fi
@@ -20662,10 +20868,10 @@ create_quick_tunnel() {
     # 启动快速隧道
     if [[ "$is_standalone" == "true" ]]; then
         # 独立模式：使用 HTTPS 并跳过证书验证
-        "$CLOUDFLARED_BIN" tunnel --no-tls-verify --url "$tunnel_url"
+        "$CLOUDFLARED_BIN" $CLOUDFLARED_EDGE_OPTS tunnel --no-tls-verify --url "$tunnel_url"
     else
         # 回落模式：使用 HTTP
-        "$CLOUDFLARED_BIN" tunnel --url "$tunnel_url"
+        "$CLOUDFLARED_BIN" $CLOUDFLARED_EDGE_OPTS tunnel --url "$tunnel_url"
     fi
 }
 
@@ -20855,7 +21061,7 @@ EOF
     
     if [[ "$dns_choice" == "1" ]]; then
         _info "配置 DNS..."
-        if "$CLOUDFLARED_BIN" tunnel route dns "$tunnel_name" "$hostname" 2>/dev/null; then
+        if "$CLOUDFLARED_BIN" $CLOUDFLARED_EDGE_OPTS tunnel route dns "$tunnel_name" "$hostname" 2>/dev/null; then
             _ok "DNS 配置成功"
         else
             _warn "DNS 自动配置失败，请手动添加 CNAME 记录"
@@ -20966,7 +21172,7 @@ _setup_cloudflared_service() {
 name="cloudflared"
 description="Cloudflare Tunnel"
 command="/usr/local/bin/cloudflared"
-command_args="tunnel run"
+command_args="--edge-ip-version auto tunnel run"
 command_background="yes"
 pidfile="/run/${RC_SVCNAME}.pid"
 output_log="/var/log/cloudflared.log"
@@ -20989,7 +21195,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=$CLOUDFLARED_BIN tunnel run
+ExecStart=$CLOUDFLARED_BIN --edge-ip-version auto tunnel run
 Restart=on-failure
 RestartSec=5
 User=root
@@ -21229,7 +21435,7 @@ uninstall_cloudflared() {
     local tunnel_name=$(_get_tunnel_name)
     if [[ -n "$tunnel_name" ]]; then
         _info "删除隧道..."
-        "$CLOUDFLARED_BIN" tunnel delete "$tunnel_name" 2>/dev/null
+        "$CLOUDFLARED_BIN" $CLOUDFLARED_EDGE_OPTS tunnel delete "$tunnel_name" 2>/dev/null
     fi
     
     # 删除文件
@@ -21248,56 +21454,127 @@ delete_tunnel() {
     echo -e "  ${W}删除 Cloudflare Tunnel${NC}"
     _line
     
-    local tunnel_name=$(_get_tunnel_name)
-    if [[ -z "$tunnel_name" ]]; then
-        _warn "没有找到已创建的隧道"
+    if ! _is_cloudflared_installed; then
+        _err "cloudflared 未安装"
         _pause
         return
     fi
     
-    local hostname=$(_get_tunnel_hostname)
+    # 获取所有远程隧道
+    _info "获取 Cloudflare 账户中的隧道列表..."
+    local tunnel_list=$("$CLOUDFLARED_BIN" $CLOUDFLARED_EDGE_OPTS tunnel list 2>/dev/null)
     
-    echo -e "  当前隧道: ${G}$tunnel_name${NC}"
-    [[ -n "$hostname" ]] && echo -e "  绑定域名: ${G}$hostname${NC}"
+    if [[ -z "$tunnel_list" ]] || ! echo "$tunnel_list" | grep -q "^[a-f0-9]"; then
+        _warn "没有找到任何隧道"
+        _pause
+        return
+    fi
+    
     echo ""
-    echo -e "  ${Y}警告：删除隧道后需要重新创建和配置${NC}"
+    echo -e "  ${W}Cloudflare 账户中的隧道:${NC}"
+    echo ""
+    
+    # 解析并显示隧道列表
+    local idx=1
+    local tunnel_ids=()
+    local tunnel_names=()
+    
+    while IFS= read -r line; do
+        # 跳过表头
+        [[ "$line" =~ ^ID ]] && continue
+        [[ -z "$line" ]] && continue
+        
+        local tid=$(echo "$line" | awk '{print $1}')
+        local tname=$(echo "$line" | awk '{print $2}')
+        local tcreated=$(echo "$line" | awk '{print $3, $4}')
+        local tconns=$(echo "$line" | awk '{print $5}')
+        
+        # 验证是否为有效 UUID
+        if [[ "$tid" =~ ^[a-f0-9-]{36}$ ]]; then
+            tunnel_ids+=("$tid")
+            tunnel_names+=("$tname")
+            
+            # 标记本地配置的隧道
+            local local_marker=""
+            local local_name=$(_get_tunnel_name)
+            if [[ "$tname" == "$local_name" ]]; then
+                local_marker=" ${G}[本地]${NC}"
+            fi
+            
+            echo -e "  ${G}$idx${NC}) $tname$local_marker"
+            echo -e "     ${D}ID: $tid | 创建: $tcreated | 连接: $tconns${NC}"
+            ((idx++))
+        fi
+    done <<< "$tunnel_list"
+    
+    if [[ ${#tunnel_ids[@]} -eq 0 ]]; then
+        _warn "没有找到有效的隧道"
+        _pause
+        return
+    fi
+    
+    echo ""
+    echo -e "  ${G}0${NC}) 取消"
+    echo ""
+    read -rp "  选择要删除的隧道: " choice
+    
+    if [[ "$choice" == "0" || -z "$choice" ]]; then
+        return
+    fi
+    
+    if [[ ! "$choice" =~ ^[0-9]+$ ]] || [[ $choice -gt ${#tunnel_ids[@]} ]]; then
+        _err "无效选择"
+        _pause
+        return
+    fi
+    
+    local selected_id="${tunnel_ids[$((choice-1))]}"
+    local selected_name="${tunnel_names[$((choice-1))]}"
+    
+    echo ""
+    echo -e "  ${Y}警告：即将删除隧道 '$selected_name'${NC}"
+    echo -e "  ${D}ID: $selected_id${NC}"
     echo ""
     read -rp "  确认删除? [y/N]: " confirm
     if [[ ! "$confirm" =~ ^[yY]$ ]]; then
         return
     fi
     
-    # 停止服务
-    _info "停止隧道服务..."
-    _stop_tunnel_service 2>/dev/null
-    
-    # 尝试删除 DNS 记录
-    if [[ -n "$hostname" ]]; then
-        _info "删除 DNS 记录: $hostname..."
-        # cloudflared 没有直接删除 DNS 的命令，需要通过 API
-        # 但我们可以提示用户手动删除，或尝试通过 tunnel cleanup
-        "$CLOUDFLARED_BIN" tunnel cleanup "$tunnel_name" 2>/dev/null
-        echo -e "  ${Y}提示: DNS 记录可能需要手动在 Cloudflare 后台删除${NC}"
+    # 停止服务（如果是本地配置的隧道）
+    local local_name=$(_get_tunnel_name)
+    if [[ "$selected_name" == "$local_name" ]]; then
+        _info "停止本地隧道服务..."
+        _stop_tunnel_service 2>/dev/null
     fi
+    
+    # 尝试清理连接
+    _info "清理隧道连接..."
+    "$CLOUDFLARED_BIN" $CLOUDFLARED_EDGE_OPTS tunnel cleanup "$selected_name" 2>/dev/null
     
     # 删除隧道
     _info "删除隧道..."
-    if "$CLOUDFLARED_BIN" tunnel delete "$tunnel_name" 2>&1; then
-        _ok "隧道已删除"
+    local delete_output=$("$CLOUDFLARED_BIN" $CLOUDFLARED_EDGE_OPTS tunnel delete "$selected_name" 2>&1)
+    local delete_exit_code=$?
+    
+    # 调试：显示错误信息以便诊断
+    if [[ $delete_exit_code -eq 0 ]] || echo "$delete_output" | grep -qiE "deleted|success"; then
+        _ok "隧道 '$selected_name' 已删除"
         
-        # 清理配置
-        rm -f "$CLOUDFLARED_DIR/tunnel.info"
-        rm -f "$CLOUDFLARED_CONFIG"
-        rm -f "$CLOUDFLARED_DIR"/*.json
-        
-        if [[ -n "$hostname" ]]; then
-            echo ""
-            echo -e "  ${C}请手动删除 Cloudflare DNS 记录:${NC}"
-            echo -e "  域名: ${G}$hostname${NC}"
-            echo -e "  类型: ${G}CNAME${NC}"
+        # 如果是本地配置的隧道，清理本地文件
+        if [[ "$selected_name" == "$local_name" ]]; then
+            rm -f "$CLOUDFLARED_DIR/tunnel.info"
+            rm -f "$CLOUDFLARED_CONFIG"
+            rm -f "$CLOUDFLARED_DIR/$selected_id.json"
+            _info "本地配置文件已清理"
         fi
+        
+        echo ""
+        echo -e "  ${Y}提示: 相关的 DNS 记录可能需要手动在 Cloudflare 后台删除${NC}"
     else
         _err "删除失败"
+        echo ""
+        echo -e "  ${Y}错误信息:${NC}"
+        echo "$delete_output"
     fi
     
     _pause
@@ -22711,39 +22988,111 @@ _configure_tg_notify() {
     done
 }
 
+# 检测当前运行的核心类型
+# 返回: xray, singbox, standalone, none
+_detect_current_core() {
+    # 优先检查 Xray
+    if _pgrep xray &>/dev/null; then
+        echo "xray"
+        return
+    fi
+    
+    # 检查 sing-box
+    if _pgrep sing-box &>/dev/null || _pgrep singbox &>/dev/null; then
+        echo "singbox"
+        return
+    fi
+    
+    # 检查独立协议
+    if _pgrep hysteria &>/dev/null || _pgrep naive &>/dev/null || _pgrep tuic &>/dev/null; then
+        echo "standalone"
+        return
+    fi
+    
+    # 检查是否有安装但未运行的情况（通过配置文件判断）
+    if [[ -f "$XRAY_CONFIG" ]]; then
+        echo "xray"
+        return
+    fi
+    
+    if [[ -f "$SINGBOX_CONFIG" ]]; then
+        echo "singbox"
+        return
+    fi
+    
+    # 检查独立协议配置
+    if [[ -f "/etc/hysteria/config.yaml" ]] || [[ -f "/etc/naive/config.json" ]]; then
+        echo "standalone"
+        return
+    fi
+    
+    echo "none"
+}
+
 # 显示实时流量统计
 _show_realtime_traffic() {
     _header
     echo -e "  ${W}实时流量统计${NC}"
     _dline
     
-    # 检查 Xray 是否运行
-    if ! _pgrep xray &>/dev/null; then
-        _err "Xray 未运行，无法获取流量统计"
-        return
-    fi
+    # 检测当前核心类型
+    local current_core=$(_detect_current_core)
     
-    echo ""
-    printf "  ${W}%-12s %-12s %-12s %-12s %-12s${NC}\n" "协议" "用户" "上行" "下行" "总计"
-    _line
-    
-    local stats=$(get_all_traffic_stats)
-    if [[ -z "$stats" ]]; then
-        echo -e "  ${D}暂无流量数据${NC}"
-    else
-        while IFS='|' read -r proto user uplink downlink total; do
-            [[ -z "$proto" ]] && continue
-            local proto_name=$(get_protocol_name "$proto")
-            local up_fmt=$(format_bytes "$uplink")
-            local down_fmt=$(format_bytes "$downlink")
-            local total_fmt=$(format_bytes "$total")
-            printf "  %-12s %-12s %-12s %-12s %-12s\n" "$proto_name" "$user" "$up_fmt" "$down_fmt" "$total_fmt"
-        done <<< "$stats"
-    fi
-    
-    _line
-    echo ""
-    echo -e "  ${D}提示: 此为 Xray 启动后的累计流量，同步后会重置${NC}"
+    case "$current_core" in
+        "xray")
+            # 检查 Xray 是否运行
+            if ! _pgrep xray &>/dev/null; then
+                _err "Xray 未运行，无法获取流量统计"
+                return
+            fi
+            
+            echo ""
+            printf "  ${W}%-12s %-12s %-12s %-12s %-12s${NC}\n" "协议" "用户" "上行" "下行" "总计"
+            _line
+            
+            local stats=$(get_all_traffic_stats)
+            if [[ -z "$stats" ]]; then
+                echo -e "  ${D}暂无流量数据${NC}"
+            else
+                while IFS='|' read -r proto user uplink downlink total; do
+                    [[ -z "$proto" ]] && continue
+                    local proto_name=$(get_protocol_name "$proto")
+                    local up_fmt=$(format_bytes "$uplink")
+                    local down_fmt=$(format_bytes "$downlink")
+                    local total_fmt=$(format_bytes "$total")
+                    printf "  %-12s %-12s %-12s %-12s %-12s\n" "$proto_name" "$user" "$up_fmt" "$down_fmt" "$total_fmt"
+                done <<< "$stats"
+            fi
+            
+            _line
+            echo ""
+            echo -e "  ${D}提示: 此为 Xray 启动后的累计流量，同步后会重置${NC}"
+            ;;
+        "singbox")
+            echo ""
+            _warn "sing-box 核心暂不支持流量统计"
+            echo ""
+            echo -e "  ${D}说明: sing-box 的 clash_api 可以获取连接信息，${NC}"
+            echo -e "  ${D}      但精确的用户流量统计功能尚未实现。${NC}"
+            echo ""
+            echo -e "  ${D}如需流量统计功能，建议使用 Xray 核心。${NC}"
+            ;;
+        "standalone")
+            echo ""
+            _warn "独立协议不支持流量统计"
+            echo ""
+            echo -e "  ${D}说明: 独立协议 (Hysteria2/NaiveProxy 等) 没有统一的${NC}"
+            echo -e "  ${D}      流量统计 API，暂时无法统计用户流量。${NC}"
+            echo ""
+            echo -e "  ${D}如需流量统计功能，建议使用 Xray 核心部署协议。${NC}"
+            ;;
+        *)
+            echo ""
+            _warn "未检测到运行中的代理核心"
+            echo ""
+            echo -e "  ${D}请先安装并启动 Xray 核心的协议。${NC}"
+            ;;
+    esac
 }
 
 # 立即同步流量数据
@@ -22752,53 +23101,78 @@ _sync_traffic_now() {
     echo -e "  ${W}同步流量数据${NC}"
     _dline
     
-    # 检查 Xray 是否运行
-    if ! pgrep -x xray &>/dev/null; then
-        _err "Xray 未运行，无法同步流量"
-        return
-    fi
+    # 检测当前核心类型
+    local current_core=$(_detect_current_core)
     
-    _info "正在同步流量数据..."
-    
-    if sync_all_user_traffic "true"; then
-        _ok "流量数据已同步到数据库"
-        echo ""
-        
-        # 显示同步后的统计
-        echo -e "  ${W}用户流量统计:${NC}"
-        _line
-        
-        for proto in $(db_list_protocols "xray"); do
-            local proto_name=$(get_protocol_name "$proto")
-            local users=$(db_get_users_stats "xray" "$proto")
-            [[ -z "$users" ]] && continue
+    case "$current_core" in
+        "xray")
+            # 检查 Xray 是否运行
+            if ! _pgrep xray &>/dev/null; then
+                _err "Xray 未运行，无法同步流量"
+                return
+            fi
             
-            echo -e "  ${C}$proto_name${NC}"
-            while IFS='|' read -r name uuid used quota enabled port routing; do
-                [[ -z "$name" ]] && continue
-                local used_fmt=$(format_bytes "$used")
-                local quota_fmt="无限制"
-                local status="${G}●${NC}"
+            _info "正在同步流量数据..."
+            
+            if sync_all_user_traffic "true"; then
+                _ok "流量数据已同步到数据库"
+                echo ""
                 
-                if [[ "$quota" -gt 0 ]]; then
-                    quota_fmt=$(format_bytes "$quota")
-                    local percent=$((used * 100 / quota))
-                    if [[ "$percent" -ge 100 ]]; then
-                        status="${R}✗${NC}"
-                    elif [[ "$percent" -ge 80 ]]; then
-                        status="${Y}⚠${NC}"
-                    fi
-                fi
+                # 显示同步后的统计
+                echo -e "  ${W}用户流量统计:${NC}"
+                _line
                 
-                [[ "$enabled" != "true" ]] && status="${R}○${NC}"
-                
-                echo -e "    $status $name: $used_fmt / $quota_fmt"
-            done <<< "$users"
-        done
-        _line
-    else
-        _err "同步失败"
-    fi
+                for proto in $(db_list_protocols "xray"); do
+                    local proto_name=$(get_protocol_name "$proto")
+                    local users=$(db_get_users_stats "xray" "$proto")
+                    [[ -z "$users" ]] && continue
+                    
+                    echo -e "  ${C}$proto_name${NC}"
+                    while IFS='|' read -r name uuid used quota enabled port routing; do
+                        [[ -z "$name" ]] && continue
+                        local used_fmt=$(format_bytes "$used")
+                        local quota_fmt="无限制"
+                        local status="${G}●${NC}"
+                        
+                        if [[ "$quota" -gt 0 ]]; then
+                            quota_fmt=$(format_bytes "$quota")
+                            local percent=$((used * 100 / quota))
+                            if [[ "$percent" -ge 100 ]]; then
+                                status="${R}✗${NC}"
+                            elif [[ "$percent" -ge 80 ]]; then
+                                status="${Y}⚠${NC}"
+                            fi
+                        fi
+                        
+                        [[ "$enabled" != "true" ]] && status="${R}○${NC}"
+                        
+                        echo -e "    $status $name: $used_fmt / $quota_fmt"
+                    done <<< "$users"
+                done
+                _line
+            else
+                _err "同步失败"
+            fi
+            ;;
+        "singbox")
+            echo ""
+            _warn "sing-box 核心暂不支持流量同步"
+            echo ""
+            echo -e "  ${D}流量统计功能仅支持 Xray 核心。${NC}"
+            ;;
+        "standalone")
+            echo ""
+            _warn "独立协议不支持流量同步"
+            echo ""
+            echo -e "  ${D}独立协议 (Hysteria2/NaiveProxy 等) 暂不支持流量统计。${NC}"
+            ;;
+        *)
+            echo ""
+            _warn "未检测到运行中的代理核心"
+            echo ""
+            echo -e "  ${D}请先安装并启动 Xray 核心的协议。${NC}"
+            ;;
+    esac
 }
 
 # 流量统计设置

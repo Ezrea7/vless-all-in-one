@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.4.4] - 2026-01-31
+
+### Fixed
+- 修复多IP入出站路由配置不生效的问题
+- 修复 Cloudflare Tunnel 命名隧道功能
+  - 修复 cloudflared 在纯 IPv6 环境下连接失败的问题
+- 改进流量统计功能兼容性
+  - sing-box 核心显示暂不支持流量统计的友好提示
+  - 独立协议 (Hysteria2/NaiveProxy 等) 显示不支持流量统计的说明
+  - 避免在非 Xray 核心环境下出现错误
+
+### Changed
+- 将「多IP入出站配置」移动到「分流管理」菜单（选项 5）
+
 ## [3.4.3] - 2026-01-29
 
 ### Fixed
