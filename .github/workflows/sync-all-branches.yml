@@ -1,4 +1,4 @@
-name: Sync All Branches - vless-all-in-one
+name: Sync vless-server.sh
 
 on:
   schedule:
@@ -14,76 +14,32 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
       - name: Configure Git
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-      - name: Check and sync
+      - name: Download and sync
         run: |
-          # ✅ 修复：先添加 remote，再 fetch
-          git remote add upstream https://github.com/Chil30/vless-all-in-one.git 2>/dev/null || true
+          # 下载最新文件
+          curl -fsSL https://raw.githubusercontent.com/Chil30/vless-all-in-one/main/vless-server.sh -o vless-server.sh.new
           
-          # ✅ 修复：使用 fetch upstream 而不是 fetch upstream --all
-          git fetch upstream --prune --tags
-          
-          HAS_UPDATE=false
-          
-          echo "🔍 检查是否有更新..."
-          
-          # 检查是否有更新
-          for branch in $(git branch -r | grep '^  upstream/' | sed 's|^ *upstream/||'); do
-            if git show-ref --quiet refs/heads/"$branch"; then
-              LOCAL_HASH=$(git rev-parse refs/heads/"$branch")
-              REMOTE_HASH=$(git rev-parse refs/remotes/upstream/"$branch")
-              if [ "$LOCAL_HASH" != "$REMOTE_HASH" ]; then
-                echo "✅ [$branch] 有更新"
-                HAS_UPDATE=true
-              else
-                echo "⏭️  [$branch] 无更新"
-              fi
-            else
-              echo "✨ [$branch] 是新分支"
-              HAS_UPDATE=true
-            fi
-          done
-          
-          if [ "$HAS_UPDATE" = false ]; then
-            echo ""
-            echo "✅ 无更新，跳过同步"
+          # 检查是否有变化
+          if diff -q vless-server.sh vless-server.sh.new > /dev/null 2>&1; then
+            echo "✅ 文件无更新"
+            rm vless-server.sh.new
             exit 0
           fi
           
-          # 有更新，开始同步
-          echo ""
-          echo "🔄 检测到更新，开始同步..."
-          echo ""
+          # 有更新，替换文件
+          echo "🔄 检测到更新"
+          mv vless-server.sh.new vless-server.sh
+          chmod +x vless-server.sh
           
-          for branch in $(git branch -r | grep '^  upstream/' | sed 's|^ *upstream/||'); do
-            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-            echo "📤 同步分支: $branch"
-            
-            git checkout "$branch" 2>/dev/null || git checkout -b "$branch" "upstream/$branch"
-            
-            if git merge upstream/"$branch" -m "🔄 sync: merge upstream/$branch ($(date -u '+%Y-%m-%d'))"; then
-              echo "✅ [$branch] 合并成功"
-            else
-              echo "⚠️  [$branch] 合并冲突，中止"
-              git merge --abort
-            fi
-          done
+          # 提交推送
+          git add vless-server.sh
+          git commit -m "🔄 sync: update vless-server.sh ($(date -u '+%Y-%m-%d'))"
+          git push
           
-          echo ""
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          echo "📤 推送所有分支..."
-          
-          git push origin --all --force-with-lease 2>/dev/null || git push origin --all --force
-          
-          echo "🏷️  推送标签..."
-          git push origin --tags 2>/dev/null || true
-          
-          echo ""
           echo "✅ 同步完成"
