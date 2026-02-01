@@ -1,0 +1,63 @@
+name: Sync All Branches - vless-all-in-one
+
+on:
+  schedule:
+    - cron: '0 16 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Sync all branches
+        id: sync
+        run: |
+          git remote add upstream https://github.com/Chil30/vless-all-in-one.git 2>/dev/null || true
+          git fetch upstream --all --prune --tags
+          
+          UPDATED_COUNT=0
+          
+          for branch in $(git branch -r | grep '^  upstream/' | sed 's|^ *upstream/||'); do
+            echo "🔄 处理分支: $branch"
+            
+            # 切换到该分支
+            git checkout "$branch" 2>/dev/null || git checkout -b "$branch" "upstream/$branch"
+            
+            # ✅ 关键改动：使用 merge 而不是 reset
+            # 这样会保留本地修改，只同步上游更新
+            if git merge upstream/"$branch" -m "🔄 sync: merge upstream/$branch"; then
+              echo "✅ [$branch] 合并成功"
+              UPDATED_COUNT=$((UPDATED_COUNT + 1))
+            else
+              # 如果有冲突，显示冲突信息
+              echo "⚠️  [$branch] 存在合并冲突"
+              git merge --abort
+            fi
+            
+            # 推送分支
+            git push origin "$branch" || git push origin "$branch" --force-with-lease
+          done
+          
+          # 同步标签
+          git push origin --tags || true
+          
+          echo "updated=$UPDATED_COUNT" >> $GITHUB_OUTPUT
+
+      - name: Summary
+        run: |
+          echo "✅ 同步完成！"
+          echo "成功更新: ${{ steps.sync.outputs.updated }} 个分支"
+          echo "📌 你的本地修改已保留"
