@@ -24,37 +24,66 @@ jobs:
 
       - name: Check and sync
         run: |
+          # ✅ 修复：先添加 remote，再 fetch
           git remote add upstream https://github.com/Chil30/vless-all-in-one.git 2>/dev/null || true
-          git fetch upstream --all --prune --tags
+          
+          # ✅ 修复：使用 fetch upstream 而不是 fetch upstream --all
+          git fetch upstream --prune --tags
           
           HAS_UPDATE=false
+          
+          echo "🔍 检查是否有更新..."
           
           # 检查是否有更新
           for branch in $(git branch -r | grep '^  upstream/' | sed 's|^ *upstream/||'); do
             if git show-ref --quiet refs/heads/"$branch"; then
-              if [ "$(git rev-parse refs/heads/$branch)" != "$(git rev-parse refs/remotes/upstream/$branch)" ]; then
+              LOCAL_HASH=$(git rev-parse refs/heads/"$branch")
+              REMOTE_HASH=$(git rev-parse refs/remotes/upstream/"$branch")
+              if [ "$LOCAL_HASH" != "$REMOTE_HASH" ]; then
+                echo "✅ [$branch] 有更新"
                 HAS_UPDATE=true
-                break
+              else
+                echo "⏭️  [$branch] 无更新"
               fi
             else
+              echo "✨ [$branch] 是新分支"
               HAS_UPDATE=true
-              break
             fi
           done
           
           if [ "$HAS_UPDATE" = false ]; then
+            echo ""
             echo "✅ 无更新，跳过同步"
             exit 0
           fi
           
           # 有更新，开始同步
+          echo ""
           echo "🔄 检测到更新，开始同步..."
+          echo ""
+          
           for branch in $(git branch -r | grep '^  upstream/' | sed 's|^ *upstream/||'); do
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            echo "📤 同步分支: $branch"
+            
             git checkout "$branch" 2>/dev/null || git checkout -b "$branch" "upstream/$branch"
-            git merge upstream/"$branch" -m "🔄 sync: $(date -u '+%Y-%m-%d')" || true
+            
+            if git merge upstream/"$branch" -m "🔄 sync: merge upstream/$branch ($(date -u '+%Y-%m-%d'))"; then
+              echo "✅ [$branch] 合并成功"
+            else
+              echo "⚠️  [$branch] 合并冲突，中止"
+              git merge --abort
+            fi
           done
           
-          git push origin --all --force-with-lease || git push origin --all --force
-          git push origin --tags || true
+          echo ""
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "📤 推送所有分支..."
           
+          git push origin --all --force-with-lease 2>/dev/null || git push origin --all --force
+          
+          echo "🏷️  推送标签..."
+          git push origin --tags 2>/dev/null || true
+          
+          echo ""
           echo "✅ 同步完成"
