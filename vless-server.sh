@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/bash 
 #═══════════════════════════════════════════════════════════════════════════════
 #  多协议代理一键部署脚本 v3.4.6 [服务端]
 #  
@@ -9499,8 +9499,8 @@ create_service() {
             ;;
     esac
 
-    _write_openrc() { # name desc cmd args
-        local name="$1" desc="$2" cmd="$3" args="$4"
+    _write_openrc() { # name desc cmd args [env]
+        local name="$1" desc="$2" cmd="$3" args="$4" env="$5"
         cat >"/etc/init.d/${name}" <<EOF
 #!/sbin/openrc-run
 name="${desc}"
@@ -9508,6 +9508,7 @@ command="${cmd}"
 command_args="${args}"
 command_background="yes"
 pidfile="/run/${name}.pid"
+${env:+export ${env}}
 depend() { need net; }
 EOF
         chmod +x "/etc/init.d/${name}"
@@ -9538,13 +9539,16 @@ EOF
 
     if [[ "$DISTRO" == "alpine" ]]; then
         local cmd="${exec_cmd%% *}" args=""; [[ "$exec_cmd" == *" "* ]] && args="${exec_cmd#* }"
-        _write_openrc "$service_name" "Proxy Server ($protocol)" "$cmd" "$args"
+        local env=""
+        # ShadowTLS CPU 100% 修复: 高版本内核 io_uring 问题
+        [[ "$kind" == "shadowtls" ]] && env="MONOIO_FORCE_LEGACY_DRIVER=1"
+        _write_openrc "$service_name" "Proxy Server ($protocol)" "$cmd" "$args" "$env"
 
         if [[ "$kind" == "shadowtls" ]]; then
-            _write_openrc "${BACKEND_NAME[$protocol]}" "${BACKEND_DESC[$protocol]}" "${BACKEND_EXEC[$protocol]%% *}" "${BACKEND_EXEC[$protocol]#* }"
+            _write_openrc "${BACKEND_NAME[$protocol]}" "${BACKEND_DESC[$protocol]}" "${BACKEND_EXEC[$protocol]%% *}" "${BACKEND_EXEC[$protocol]#* }" ""
         fi
 
-        _write_openrc "vless-watchdog" "VLESS Watchdog" "/bin/bash" "$CFG/watchdog.sh"
+        _write_openrc "vless-watchdog" "VLESS Watchdog" "/bin/bash" "$CFG/watchdog.sh" ""
     else
         local pre="" env="" requires="" after=""
         [[ "$kind" == "hy2" ]] && pre="-/bin/bash $CFG/hy2-nat.sh"
@@ -17273,12 +17277,31 @@ do_install_server() {
 
     _info "生成配置参数..."
     
-    # 使用新的智能端口选择
+    # ===== 对于 Snell/SS2022，先询问是否启用 ShadowTLS =====
+    local skip_port_ask=false
+    if [[ "$protocol" == "snell" || "$protocol" == "snell-v5" || "$protocol" == "ss2022" ]]; then
+        echo ""
+        _line
+        echo -e "  ${W}ShadowTLS 插件${NC}"
+        _line
+        echo -e "  ${D}Surge 用户通常建议直接使用 Snell。${NC}"
+        echo -e "  ${D}但在高阻断环境下，您可能需要 ShadowTLS 伪装。${NC}"
+        echo ""
+        read -rp "  是否启用 ShadowTLS (v3) 插件? [y/N]: " enable_stls_pre
+        
+        if [[ "$enable_stls_pre" =~ ^[yY]$ ]]; then
+            skip_port_ask=true  # 启用 ShadowTLS 时跳过第一次端口询问
+        fi
+    fi
+    
+    # 使用新的智能端口选择（ShadowTLS 模式下跳过）
     local port
-    port=$(ask_port "$protocol")
-    if [[ $? -ne 0 || -z "$port" ]]; then
-        _warn "已取消端口配置"
-        return 1
+    if [[ "$skip_port_ask" == "false" ]]; then
+        port=$(ask_port "$protocol")
+        if [[ $? -ne 0 || -z "$port" ]]; then
+            _warn "已取消端口配置"
+            return 1
+        fi
     fi
     
     case "$protocol" in
@@ -17845,15 +17868,8 @@ do_install_server() {
             
             local password=$(head -c $key_len /dev/urandom 2>/dev/null | base64 -w 0)
             
-            echo ""
-            _line
-            echo -e "  ${W}ShadowTLS 插件${NC}"
-            _line
-            echo -e "  ${D}在高阻断环境下，您可能需要 ShadowTLS 伪装。${NC}"
-            echo ""
-            read -rp "  是否启用 ShadowTLS (v3) 插件? [y/N]: " enable_stls
-            
-            if [[ "$enable_stls" =~ ^[yY]$ ]]; then
+            # 使用前面询问的结果
+            if [[ "$enable_stls_pre" =~ ^[yY]$ ]]; then
                 # 安装 ShadowTLS
                 _info "安装 ShadowTLS..."
                 install_shadowtls || { _err "ShadowTLS 安装失败"; _pause; return 1; }
@@ -18090,16 +18106,8 @@ do_install_server() {
                 stls_protocol="snell-v5-shadowtls"
             fi
             
-            echo ""
-            _line
-            echo -e "  ${W}ShadowTLS 插件${NC}"
-            _line
-            echo -e "  ${D}Surge 用户通常建议直接使用 Snell。${NC}"
-            echo -e "  ${D}但在高阻断环境下，您可能需要 ShadowTLS 伪装。${NC}"
-            echo ""
-            read -rp "  是否启用 ShadowTLS (v3) 插件? [y/N]: " enable_stls
-            
-            if [[ "$enable_stls" =~ ^[yY]$ ]]; then
+            # 使用前面询问的结果
+            if [[ "$enable_stls_pre" =~ ^[yY]$ ]]; then
                 # 安装 ShadowTLS
                 _info "安装 ShadowTLS..."
                 install_shadowtls || { _err "ShadowTLS 安装失败"; _pause; return 1; }
