@@ -2,7 +2,7 @@ name: Sync vless-server.sh
 
 on:
   schedule:
-    - cron: '0 16 * * *'
+    - cron: '0 */3 * * *'
   workflow_dispatch:
 
 permissions:
