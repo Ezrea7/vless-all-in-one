@@ -66,6 +66,7 @@ It helps you quickly deploy and manage multiple protocols in one place, includin
 
 <p>
   <a href="https://www.skylineconnect.io/signup?aff=01CC63AP" target="_blank" rel="noopener noreferrer">
+    <img src="https://www.skylineconnect.io/images/favicon.svg" height="50">
     <strong>SkylineConnect</strong>
   </a>
   — SoftBank/Lumen routes, mainland China optimized networking, high-traffic servers, and 10 Gbps virtual machine ports.
