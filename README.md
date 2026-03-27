@@ -25,14 +25,6 @@ It helps you quickly deploy and manage multiple protocols in one place, includin
 </p>
 
 <p>
-  <a href="https://www.vipcloud.cc/aff/QXUUKZSH" target="_blank" rel="noopener noreferrer">
-    <img src="https://www.vipcloud.cc/favicon.ico" alt="VIP Cloud" width="50" height="50" style="vertical-align: middle; margin-right: 6px;" />
-    <strong>VIP Cloud</strong>
-  </a>
-  — Native IP, streaming-unlocked routes, China Telecom CN2 GIA, China Mobile CMIN2, and optimized routing for major Chinese ISPs.
-</p>
-
-<p>
   <a href="https://akile.io/register?aff_code=b349580b-113a-4b42-ab76-c2db81c5c22d" target="_blank" rel="noopener noreferrer">
     <img src="https://akile.io/favicon.ico" alt="AkileCloud" height="50" style="vertical-align: middle; margin-right: 6px;" />
     <strong>AkileCloud</strong>
